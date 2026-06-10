@@ -26,6 +26,32 @@ if [ "${#SND[@]}" -eq 0 ]; then SND=(local); fi
 
 human() { awk -v b="$1" 'BEGIN{split("B K M G T P",u);for(i=1;b>=1024&&i<6;i++)b/=1024;printf "%.1f%s",b,u[i]}'; }
 
+# 采样某发送端主网卡 1s 吞吐,输出: "iface tx_bytes_per_s rx_bytes_per_s"
+net_rate() {
+    local sender="$1"
+    if [ "$sender" = "local" ] || [ "$sender" = "localhost" ]; then
+        bash -s <<'NETEOF'
+ifc=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+[ -z "$ifc" ] && ifc=$(ls /sys/class/net 2>/dev/null | grep -vx lo | head -1)
+[ -z "$ifc" ] && { echo "- 0 0"; exit 0; }
+t1=$(cat /sys/class/net/$ifc/statistics/tx_bytes 2>/dev/null); r1=$(cat /sys/class/net/$ifc/statistics/rx_bytes 2>/dev/null)
+sleep 1
+t2=$(cat /sys/class/net/$ifc/statistics/tx_bytes 2>/dev/null); r2=$(cat /sys/class/net/$ifc/statistics/rx_bytes 2>/dev/null)
+echo "$ifc $((t2-t1)) $((r2-r1))"
+NETEOF
+    else
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 "$sender" bash -s <<'NETEOF' 2>/dev/null
+ifc=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+[ -z "$ifc" ] && ifc=$(ls /sys/class/net 2>/dev/null | grep -vx lo | head -1)
+[ -z "$ifc" ] && { echo "- 0 0"; exit 0; }
+t1=$(cat /sys/class/net/$ifc/statistics/tx_bytes 2>/dev/null); r1=$(cat /sys/class/net/$ifc/statistics/rx_bytes 2>/dev/null)
+sleep 1
+t2=$(cat /sys/class/net/$ifc/statistics/tx_bytes 2>/dev/null); r2=$(cat /sys/class/net/$ifc/statistics/rx_bytes 2>/dev/null)
+echo "$ifc $((t2-t1)) $((r2-r1))"
+NETEOF
+    fi
+}
+
 # 在某发送端(本机或 ssh)收集分片进度,输出: label<TAB>total<TAB>done<TAB>work
 collect() {
     local sender="$1" stamp="$2"
@@ -92,6 +118,15 @@ snapshot() {
     local apct
     apct=$(awk -v d="$tot_done" -v t="$tot_total" 'BEGIN{printf "%s", (t>0)?sprintf("%.1f",d*100/t):"-"}')
     echo "合计: ${tot_done}/${tot_total} 分区  ≈ ${apct}%   活跃 work 合计: ${tot_work}"
+    # 每台发送端网卡吞吐(1s 采样;TX=推出 EFS 的流量)
+    echo "------------------------------------------------------------------"
+    echo "网络吞吐(各发送端, 1s 采样):"
+    printf "%-26s %-8s %-12s %s\n" "发送端" "网卡" "TX/s↑" "RX/s"
+    local s ifc tx rx
+    for s in "${SND[@]}"; do
+        read -r ifc tx rx < <(net_rate "$s")
+        printf "%-26s %-8s %-12s %s\n" "$s" "${ifc:--}" "$(human "${tx:-0}")/s" "$(human "${rx:-0}")/s"
+    done
     echo "(完成以各分片 fpsync 主进程退出 + 日志 'Fpsync stopped (with success)' 为准)"
 }
 
