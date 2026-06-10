@@ -64,7 +64,7 @@ tiny_ratio=0.8441  large_ratio=0.0014  scan_seconds=2
 ### 4.3 T3 参数生成 + 自动推导 + 回写 — ✅
 留空 → 按画像推导(tiny_ratio>0.7 走小文件分支):
 ```
-[-n] 4     tiny files dominate; metadata IOPS 瓶颈,提高并发(EFS nconnect 上限 16)
+[-n] 4     tiny files dominate; metadata IOPS 瓶颈,提高并发(上限 16: EFS 元数据限流/收益递减)
 [-f] 1000  small partitions => 更高并行度
 [-s] 4g    default
 [-o] -lptgoD --numeric-ids --inplace --whole-file   (小文件加 --whole-file)

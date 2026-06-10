@@ -108,14 +108,15 @@ printf "  CPU cores:      %s\n" "$CORES"
 echo ""
 
 # === 决策 1: 并发数 -n ===
-# EFS NFS nconnect 上限 16,fpsync 并发超过此值收益递减
+# 上限 16: 并发再高对 EFS 多为元数据限流/收益递减(EFS 不支持 nconnect,
+# 并行靠多 rsync 进程/多节点,而非客户端连接数)
 echo "=== Decision Process ==="
 
 if fcmp_gt "$TINY_RATIO" "0.7"; then
     SCENARIO="tiny-files-dominant"
     JOBS=$((CORES * 2))
     [ $JOBS -gt 16 ] && JOBS=16
-    REASONING="tiny files dominate; metadata IOPS is bottleneck, raise concurrency (cap 16 for EFS nconnect)"
+    REASONING="tiny files dominate; metadata IOPS is bottleneck, raise concurrency (cap 16: EFS metadata throttling/diminishing returns)"
 elif [ "$LARGE_COUNT" -gt 100 ]; then
     SCENARIO="large-files-dominant"
     JOBS=$CORES
@@ -408,7 +409,8 @@ if fcmp_gt "$TINY_RATIO" "0.7"; then
 
 EFS recommendations:
   - Switch to Elastic Throughput mode (or General Purpose with Provisioned IOPS)
-  - Mount with: nfsvers=4.1,rsize=1048576,wsize=1048576,hard,noresvport,nconnect=16
+  - Mount with: nfsvers=4.1,rsize=1048576,wsize=1048576,hard,noresvport
+    (注: EFS 不支持 nconnect;并行靠多 rsync 进程(fpsync -n)/多节点,而非客户端连接数)
   - Consider tar-piping for extreme small-file scenarios:
       tar -cf - -C /mnt/source . | pv | tar -xf - -C /mnt/dest
 

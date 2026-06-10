@@ -239,7 +239,8 @@ bash "$WORKDIR/run.sh"
 | 大文件 >100 个 | 1 × CPU 核 | 8 | 带宽瓶颈,避免争用 |
 | 混合场景 | 1.5 × CPU 核 | 16 | 平衡 |
 
-> **EFS 注意**: nconnect 上限 16,fpsync `-n` 超过此值收益递减,且可能触发 metadata 限流。
+> **EFS 注意**: `-n` 上限 16,再高对 EFS 多为收益递减且可能触发 metadata 限流。
+> (EFS **不支持 nconnect**;并行靠多 rsync 进程(`fpsync -n`)/多节点,而非客户端连接数。)
 
 ### 参数 `-f` (每分区文件数)
 
@@ -305,7 +306,7 @@ fpsync -n 16 -f 1000 -s 512m \
 
 额外建议输出:
 - 切换 EFS 到 Elastic Throughput
-- nconnect=16 挂载
+- EFS 不支持 nconnect;并行靠多 rsync 进程(`-n`)/多节点
 - 考虑 tar 管道方案
 
 ### 案例 2: 视频文件(EBS → S3 间通过 EC2 中转)
