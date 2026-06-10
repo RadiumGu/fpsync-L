@@ -22,18 +22,23 @@ fpart 不便处理散文件,所以 `shard-plan.sh` 目前对它**只打印提示
 
 ---
 
-## TODO-2: 远程发送节点 (GCP_SENDERS) 多对并行端到端编排
-**背景**:`shard-plan.sh` 现在 `GCP_SENDERS` 留空=本机单发送(多组抢同一网卡,不增吞吐)。
-远程发送分支(`ssh "$sender" "..."`)已写但**仅测过本机发送**,多台发送机并行未验证。
+## TODO-2: 远程发送节点 (GCP_SENDERS) 多对并行端到端编排 — ✅ 已完成并实测
+**实现**(`shard-plan.sh`):
+1. **SSH 扇出启动**:控制机经 `ssh <sender> bash -s <<EOF` heredoc 在各发送机起 fpsync,
+   `RSYNC_RSH` 用 `printf %q` 安全注入,规避引号问题;本机发送直接本地跑。
+2. **前置体检** `preflight()`:逐发送机校验 SSH 可达 + fpsync 存在 + 源已挂载 + 运行目录可写;
+   `--apply` 前不通即中止。
+3. **1:1 映射**:组 i → 发送 i / 接收 i;组数 > 节点对数时排队提示(已有)。
+4. **汇总进度**:配合 `shard-monitor.sh`(SSH 收集各发送机各 run 的 done/total)。
 
-**待做**:
-1. **SSH 扇出启动**:控制机 SSH 到每台发送机起 fpsync;打磨远程命令的引号/环境(RSYNC_RSH、RUN_DIR mkdir)。
-2. **并行协调与收尾**:同时拉起 N 对后跨机等待全部完成,汇总成功/失败,失败分片自动 `fpsync -r` 续传/重试。
-3. **前置体检**:每台发送机已装 fpsync、Filestore 同路径挂载、到各自接收机免密 SSH、RUN_DIR 可写。
-4. 1:1 映射(组 i → 发送 i → 接收 i),组数 > 节点对数时排队提示(已有)。
+**已实测**(东京 EC2,2 对并行):
+- 临时起 2 台接收节点(new1=10.1.2.94 / new2=10.1.2.103,仅挂 EFS+rsync,用后已终止);
+- 发送端 = master(本机) + worker(10.1.2.81),接收端 = new1 / new2,`RSYNC_SSH` 走 SSH;
+- `shard-plan 2`:pair1 large 经 master→new1,pair2 medium/small/tiny 经 **81→new2**(远程 SSH 扇出);
+- 预跑(prepare)在各自发送机成功;`--apply` 并行传输;汇总监控跨两发送机 2/7→7/7=100%;
+- EFS 落地 large5/medium50/small500/tiny3005=3560,各子树完整性 diff=0。
 
-**验证**:需 ≥2 发送 + ≥2 接收(现测试环境只有 master + 1 worker,worker 当接收,无法忠实复现)。
-方案:临时再开 1~2 台 EC2 用 4 台模拟 2 发送×2 接收;或留待 GCP+AWS 真实环境。
+**仍待打磨(可选)**:失败分片自动 `fpsync -r` 续传/重试、`--wait` 阻塞到全部完成。
 
 ---
 

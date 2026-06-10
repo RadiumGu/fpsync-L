@@ -138,62 +138,97 @@ STAMP=$(date +%Y%m%d_%H%M%S)
 RSYNC_OPTS_EFF="$RSYNC_OPTS"
 [ -n "$BWLIMIT" ] && RSYNC_OPTS_EFF="$RSYNC_OPTS_EFF --bwlimit=$BWLIMIT"
 
-[ "$APPLY" -eq 1 ] && echo "=== 模式: APPLY(真实传输)===" || echo "=== 模式: DRY-RUN(仅 fpsync -p 预跑 + 打印命令;加 --apply 真跑)==="
+# ---------- 前置体检(发送端)----------
+preflight() {
+    local ok=1 s out miss
+    local list=()
+    if [ "$N" -gt 0 ]; then list=("${SND[@]}"); else list=("local"); fi
+    echo "=== 前置体检(发送端)==="
+    for s in "${list[@]}"; do
+        if [ "$s" = "local" ] || [ "$s" = "localhost" ]; then
+            local lok=1
+            command -v fpsync >/dev/null 2>&1 || { echo "  ✗ local: fpsync 缺失"; lok=0; }
+            [ -d "$SRC_DIR" ] || { echo "  ✗ local: 源 $SRC_DIR 不存在/未挂载"; lok=0; }
+            mkdir -p "$RUN_DIR_BASE" 2>/dev/null; [ -w "$RUN_DIR_BASE" ] || { echo "  ✗ local: 运行目录 $RUN_DIR_BASE 不可写"; lok=0; }
+            [ "$lok" = 1 ] && echo "  ✓ local: fpsync/源/运行目录 OK" || ok=0
+        else
+            out=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 "$s" '
+                command -v fpsync >/dev/null 2>&1 && echo FP_OK
+                [ -d "'"$SRC_DIR"'" ] && echo SRC_OK
+                mkdir -p "'"$RUN_DIR_BASE"'" 2>/dev/null && [ -w "'"$RUN_DIR_BASE"'" ] && echo RD_OK
+            ' 2>/dev/null) || { echo "  ✗ $s: SSH 不可达"; ok=0; continue; }
+            miss=""
+            echo "$out" | grep -q FP_OK  || miss="$miss fpsync"
+            echo "$out" | grep -q SRC_OK || miss="$miss 源未挂载($SRC_DIR)"
+            echo "$out" | grep -q RD_OK  || miss="$miss 运行目录不可写"
+            [ -z "$miss" ] && echo "  ✓ $s: fpsync/源/运行目录 OK" || { echo "  ✗ $s:$miss"; ok=0; }
+        fi
+    done
+    return $((1 - ok))
+}
 
-i=0
+if ! preflight; then
+    echo "‼ 前置体检未通过。"
+    if [ "$APPLY" -eq 1 ]; then echo "  已中止 --apply,请修复后重试。" >&2; exit 1; fi
+    echo "  (dry-run 继续,仅供查看)"
+fi
+echo ""
+
+# ---------- 在发送端执行: 本机直接跑;远程经 ssh bash -s + heredoc(规避引号噩梦)----------
+exec_on() {
+    # $1=sender  $2=待建目录(空格分隔)  $3=命令(不含 RSYNC_RSH 前缀,由本函数注入)
+    local sender="$1" mkdirs="$2" cmd="$3"
+    if [ "$sender" = "local" ] || [ "$sender" = "localhost" ] || [ -z "$sender" ]; then
+        [ -n "$RSYNC_SSH" ] && export RSYNC_RSH="$RSYNC_SSH"
+        mkdir -p $mkdirs 2>/dev/null || true
+        bash -c "$cmd"
+    else
+        ssh -o StrictHostKeyChecking=no "$sender" bash -s <<EOF
+$( [ -n "$RSYNC_SSH" ] && printf 'export RSYNC_RSH=%q\n' "$RSYNC_SSH" )
+mkdir -p $mkdirs 2>/dev/null || true
+$cmd
+EOF
+    fi
+}
+
+[ "$APPLY" -eq 1 ] && echo "=== 模式: APPLY(真实传输)===" || echo "=== 模式: DRY-RUN(fpsync -p 预跑 + 打印命令;--apply 真跑)==="
+
 while IFS=$'\t' read -r bucket bytes files rel; do
-    # 组 i -> 接收端/发送端 (按组号,1:1)
-    ridx=$(( (bucket - 1) % M ))
-    rcv="${RCV[$ridx]}"
-    if [ "$N" -gt 0 ]; then sidx=$(( (bucket - 1) % N )); sender="${SND[$sidx]}"; else sender=""; fi
-
+    ridx=$(( (bucket - 1) % M )); rcv="${RCV[$ridx]}"
+    if [ "$N" -gt 0 ]; then sidx=$(( (bucket - 1) % N )); sender="${SND[$sidx]}"; else sender="local"; fi
     safe=$(printf '%s' "$rel" | tr -c 'A-Za-z0-9_.-' '_')
     RUN_DIR="${RUN_DIR_BASE}/shard_${STAMP}_b${bucket}_${safe}"
 
     if [ "$rel" = "<root-files>" ]; then
-        # 顶层散落文件: 用 rsync --files-from(fpart 不便处理散文件)
-        SRC="$SRC_DIR"
-        DST="${rcv%/}/"
-        echo "--- [组$bucket] <root-files> -> $DST  (发送: ${sender:-local})  顶层散文件用 rsync --files-from ---"
-        echo "    (本批先列出; 散文件清单建议: cd \"$SRC_DIR\" && find . -maxdepth 1 -type f > files.lst; rsync -a --files-from=files.lst ...)"
+        echo "--- [组$bucket] <root-files> (顶层散文件)  发送:${sender} -> ${rcv%/}/ ---"
+        echo "    (TODO-1: 顶层散文件用 rsync --files-from 传输;本批跳过)"
         continue
     fi
 
-    SRC="${SRC_DIR%/}/$rel/"
-    DST="${rcv%/}/$rel/"
+    SRC="${SRC_DIR%/}/$rel/"; DST="${rcv%/}/$rel/"
+    echo "--- [组$bucket] $rel ($(human "$bytes")/$files 文件)  发送:${sender} -> $DST ---"
 
-    echo "--- [组$bucket] $rel  ($(human "$bytes")/$files 文件)  发送:${sender:-local} -> $DST ---"
-
-    # dry-run: prepare(只爬源)
     DRY="fpsync -p -n $JOBS -f $FILES_PER_PART -s $SIZE_PER_PART -O \"$FPART_OPTS\" -t \"${RUN_DIR}_dry\" -d \"${RUN_DIR}_dry\" \"$SRC\" \"$DST\""
-    # real: 带 RSYNC_RSH(若有)+ nohup
+    REAL="nohup fpsync -n $JOBS -f $FILES_PER_PART -s $SIZE_PER_PART -O \"$FPART_OPTS\" -o \"$RSYNC_OPTS_EFF\" -t \"$RUN_DIR\" -d \"$RUN_DIR\" \"$SRC\" \"$DST\" > \"$RUN_DIR.log\" 2>&1 </dev/null &"
     PFX=""; [ -n "$RSYNC_SSH" ] && PFX="RSYNC_RSH=\"$RSYNC_SSH\" "
-    REAL="${PFX}nohup fpsync -n $JOBS -f $FILES_PER_PART -s $SIZE_PER_PART -O \"$FPART_OPTS\" -o \"$RSYNC_OPTS_EFF\" -t \"$RUN_DIR\" -d \"$RUN_DIR\" \"$SRC\" \"$DST\" > \"$RUN_DIR.log\" 2>&1 &"
-
-    run_here() {  # 在发送端(本机或 ssh)执行一条命令
-        local c="$1"
-        if [ -z "$sender" ] || [ "$sender" = "localhost" ]; then
-            [ -n "$RSYNC_SSH" ] && export RSYNC_RSH="$RSYNC_SSH"
-            mkdir -p "$RUN_DIR" "${RUN_DIR}_dry" 2>/dev/null || true
-            bash -c "$c"
-        else
-            ssh -o StrictHostKeyChecking=no "$sender" "mkdir -p '$RUN_DIR' '${RUN_DIR}_dry'; $c"
-        fi
-    }
 
     if [ "$APPLY" -eq 1 ]; then
-        echo "    启动: $REAL"
-        run_here "$REAL"
+        echo "    启动(发送端 ${sender})"
+        exec_on "$sender" "$RUN_DIR ${RUN_DIR}_dry" "$REAL"
     else
-        echo "    预跑: $DRY"
-        run_here "$DRY" 2>&1 | grep -E 'Successfully prepared|ERROR|error' | sed 's/^/      /' || true
-        echo "    真跑命令(--apply 时执行 / 也可手动复制到发送端):"
-        echo "      $REAL"
+        echo "    预跑:"
+        exec_on "$sender" "${RUN_DIR}_dry" "$DRY" 2>&1 | grep -E 'Successfully prepared|ERROR|error|denied|No such' | sed 's/^/      /' || true
+        echo "    真跑命令(也可手动复制到发送端 ${sender} 执行):"
+        echo "      ${PFX}$REAL"
     fi
-    echo "    监控: FPSYNC_DIR=$RUN_DIR $SCRIPT_DIR/fpsync-monitor-20260610.sh 5  $([ -n "$sender" ] && echo "(在 $sender 上)")"
-    i=$((i+1))
+    if [ "$sender" = "local" ] || [ "$sender" = "localhost" ]; then
+        echo "    监控: FPSYNC_DIR=$RUN_DIR $SCRIPT_DIR/fpsync-monitor-20260610.sh 5"
+    else
+        echo "    监控: ssh $sender 'FPSYNC_DIR=$RUN_DIR <脚本目录>/fpsync-monitor-20260610.sh 5'"
+    fi
 done < "$ASSIGN"
 
 echo ""
 echo "分配明细: $ASSIGN"
-[ "$APPLY" -eq 0 ] && echo "确认无误后加 --apply 真跑:  $0 $K --apply"
+echo "汇总进度(一屏看所有分片): $SCRIPT_DIR/shard-monitor.sh 5"
+[ "$APPLY" -eq 0 ] && echo "确认无误后真跑:  $0 $K --apply"
