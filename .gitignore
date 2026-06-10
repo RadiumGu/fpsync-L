@@ -1,0 +1,10 @@
+# fpsync 工具集 — 忽略运行时/临时产物
+fpsync.env.bak          # generate 回写前的自动备份
+*.bak
+
+# 画像/运行产物若放在仓库目录内时忽略(默认在仓库外的 WORKDIR/RUN_DIR_BASE)
+profile.json
+sizes.txt
+run.sh
+fpsync_runs/
+fpsync_profile/
