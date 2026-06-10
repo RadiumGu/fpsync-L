@@ -52,6 +52,9 @@ FILES_PER_PART="${FILES_PER_PART:-2000}"
 SIZE_PER_PART="${SIZE_PER_PART:-4g}"
 FPART_OPTS="${FPART_OPTS:--x|.zfs|-x|.snapshot*|-x|.ckpt}"
 
+# 跨云/远程: 配置了 RSYNC_SSH 则校验也经该 SSH 传输(远程 DST = user@host:/path)
+[ -n "${RSYNC_SSH:-}" ] && export RSYNC_RSH="$RSYNC_SSH"
+
 if [ -z "$SRC" ] || [ -z "$DST" ]; then
     echo "Usage: $0 <SRC/> <DST/> [JOBS] [WORKDIR] [user@host ...]" >&2
     echo "  (或在 $SCRIPT_DIR/fpsync.env 中设置 SRC_DIR / DST_DIR,位置参数则全部作为 worker 节点)" >&2

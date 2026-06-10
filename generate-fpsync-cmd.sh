@@ -181,11 +181,22 @@ fi
 if [ "$P99" -gt 1073741824 ]; then
     RSYNC_OPTS="$RSYNC_OPTS --sparse"
 fi
+# 跨云/远程检测: DST 为 user@host:/path 或配置了 RSYNC_SSH 时,加入续传/超时保护
+REMOTE_PUSH=0
+case "$DST" in *:*) REMOTE_PUSH=1 ;; esac
+[ -n "${RSYNC_SSH:-}" ] && REMOTE_PUSH=1
+if [ "$REMOTE_PUSH" -eq 1 ]; then
+    RSYNC_OPTS="$RSYNC_OPTS --partial --timeout=600"
+fi
 if [ -n "$RSYNC_OPTS_OVERRIDE" ]; then
     RSYNC_OPTS="$RSYNC_OPTS_OVERRIDE"
     echo "  [-o rsync_opts] $RSYNC_OPTS  (overridden by fpsync.env)"
 else
     echo "  [-o rsync_opts] $RSYNC_OPTS"
+fi
+if [ "$REMOTE_PUSH" -eq 1 ]; then
+    echo "  [远程模式] DST 为远程或已设 RSYNC_SSH: rsync 经 SSH 推送(RSYNC_RSH),已加 --partial --timeout"
+    [ -n "${BWLIMIT:-}" ] && echo "             限速: --bwlimit=$BWLIMIT (运行时追加)"
 fi
 
 # === 决策 5: fpart 选项 (-O) ===
@@ -291,6 +302,16 @@ RSYNC_OPTS="${RSYNC_OPTS:?RSYNC_OPTS 未设置}"
 FPART_OPTS="${FPART_OPTS:?FPART_OPTS 未设置}"
 RUN_DIR_BASE="${RUN_DIR_BASE:-/var/log/fpsync_runs}"
 
+# 跨云/远程: 配置了 RSYNC_SSH 则 rsync 经该 SSH 命令传输(RSYNC_RSH);
+# 配置了 BWLIMIT 则限速。两者留空 = 本地模式,行为不变。
+RSYNC_SSH="${RSYNC_SSH:-}"
+BWLIMIT="${BWLIMIT:-}"
+RSYNC_OPTS_EFF="$RSYNC_OPTS"
+[ -n "$BWLIMIT" ] && RSYNC_OPTS_EFF="$RSYNC_OPTS_EFF --bwlimit=$BWLIMIT"
+[ -n "$RSYNC_SSH" ] && export RSYNC_RSH="$RSYNC_SSH"
+SSH_PREFIX=""
+[ -n "$RSYNC_SSH" ] && SSH_PREFIX="RSYNC_RSH=\"$RSYNC_SSH\" "
+
 # 时间戳+PID 子目录: 同机多实例/同秒启动也不撞名;-t 与 -d 同指本目录,
 # queue/work/done/parts/log 全部隔离在本实例下,监控可按目录定向(方案A)。
 RUN_DIR="${RUN_DIR_BASE}/run_$(date +%Y%m%d_%H%M%S)_$$"
@@ -310,14 +331,15 @@ fpsync -p \
 echo ""
 echo "=== Partition count generated above. Review then run actual transfer. ==="
 echo "To execute the real transfer, run the command below (writes to DST):"
+[ -n "$RSYNC_SSH" ] && echo "(远程模式: 经 SSH 推送; 命令已自带 RSYNC_RSH)"
 echo ""
 cat <<CMD
-nohup fpsync \\
+${SSH_PREFIX}nohup fpsync \\
     -n $JOBS \\
     -f $FILES_PER_PART \\
     -s $SIZE_PER_PART \\
     -O "$FPART_OPTS" \\
-    -o "$RSYNC_OPTS" \\
+    -o "$RSYNC_OPTS_EFF" \\
     -t "$RUN_DIR" \\
     -d "$RUN_DIR" \\
     "$SRC" "$DST" \\

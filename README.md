@@ -11,6 +11,7 @@
 | `fpsync.env` | **统一配置文件**(复制相关环境变量的唯一真相源,各脚本与 run.sh 共同加载) |
 | `source-profile.sh` | 扫描源端,生成 JSON 格式的文件系统画像(含 P50/P90/P99 分位数) |
 | `generate-fpsync-cmd.sh` | 读取画像,推导出最优 fpsync 参数,生成可执行命令 |
+| `shard-plan.sh` | 按字节均衡把源端顶层子树分成 K 组,生成/执行跨云分片传输(多组 = 多对 发送/接收节点) |
 | `fpsync-verify.sh` | 用 fpsync 并发做内容级一致性校验(rsync `--checksum` 干跑),读 `fpsync.env` |
 | `fpsync-data-consistency.md` | fpsync/rsync 一致性机制说明与校验/对账建议 |
 | `README.md` | 本说明文档 |
@@ -95,7 +96,13 @@ queue/work/done/parts/log 全部落在该实例独立目录下。带来两个好
 2. **同机多实例并发**:时间戳+PID 保证不撞名,各实例的临时/共享目录完全隔离
    (例如按顶层目录分片,同机起多个 `run.sh`)。
 
-> **监控某个实例**:用 `FPSYNC_DIR` 指向该实例的 `RUN_DIR`,监控面板会只统计该实例
+> **监控(默认即可)**:`fpsync-monitor` 会 `source fpsync.env`,**未指定时自动挑
+> `RUN_DIR_BASE` 下最近一个真实 run 目录**,所以单实例直接运行即可,无需手动指定目录:
+> ```bash
+> ./fpsync-monitor-20260610.sh 5        # 5 秒刷新; 自动定位最近的 run
+> ```
+>
+> **盯某个具体实例(同机多开时)**:用 `FPSYNC_DIR` 指向该实例的 `RUN_DIR`,面板只统计该实例
 > (面板 3/4/7 按该目录,面板 1 按 `-d` 路径过滤主进程,面板 2 的 rsync 按 `--files-from`
 > 里的 `/<runid>/` 过滤,不会把别的实例的 rsync 混进来):
 > ```bash

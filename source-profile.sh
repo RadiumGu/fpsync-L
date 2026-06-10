@@ -40,39 +40,89 @@ echo "=== Scanning $SRC_DIR ==="
 echo "Workdir: $WORKDIR"
 
 # ----------------------------------------------------------------------
-# 第 1 步: 一次性扫描,只输出文件大小(原始字节数)
-# 这是整个流程中唯一一次完整目录遍历
+# 第 1 步: 扫描源端。按【顶层子目录并行】遍历,重叠 NFS 元数据延迟,
+#          千万级目录显著缩短墙钟时间。一次遍历同时拿到文件大小与目录数。
+#   中间文件 entries.txt: 每行 "<type> <size>" (type: f=文件 d=目录 ...)
+#   兼容产出 sizes.txt: 仅文件大小,一行一个(供参考/排错)
 # ----------------------------------------------------------------------
+# 并行度: 配置 SCAN_PARALLEL 优先;留空则按 CPU 估(核数×4,下限 4)
+SCAN_PARALLEL="${SCAN_PARALLEL:-}"
+if ! [ "${SCAN_PARALLEL:-0}" -ge 1 ] 2>/dev/null; then
+    SCAN_PARALLEL=$(( $(nproc 2>/dev/null || echo 4) * 4 ))
+    [ "$SCAN_PARALLEL" -lt 4 ] && SCAN_PARALLEL=4
+fi
+echo "Scan parallelism: $SCAN_PARALLEL (按顶层子目录并行 find)"
+
 SCAN_START=$(date +%s)
-find "$SRC_DIR" -type f -printf '%s\n' > "$WORKDIR/sizes.txt"
+ENTRIES="$WORKDIR/entries.txt"
+SUBSZ="$WORKDIR/subtree-sizes.tsv"   # 每行: bytes <TAB> files <TAB> 顶层子树相对路径(供 shard-plan.sh)
+PARTD="$WORKDIR/.scan_parts"
+: > "$ENTRIES"; : > "$SUBSZ"
+rm -rf "$PARTD"; mkdir -p "$PARTD"
+
+# 顶层散落文件单列为伪子树 "<root-files>"(子目录交给并行 worker,避免重复计数)
+find "$SRC_DIR" -mindepth 1 -maxdepth 1 -type f -printf 'f %s\n' > "$PARTD/root.entries" 2>/dev/null || true
+
+# 顶层子目录 -> 各自递归扫描(含子树内文件+目录),并行执行;-print0 兼容特殊文件名
+# 每个 worker 产出 entries(p.XXXX)与子树标签(p.XXXX.subtree)
+find "$SRC_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null \
+  | xargs -0 -P "$SCAN_PARALLEL" -I{} sh -c '
+        pf="$(mktemp "$2/p.XXXXXX")"
+        find "$1" -printf "%y %s\n" > "$pf" 2>/dev/null
+        printf "%s" "$1" > "$pf.subtree"
+    ' _ {} "$PARTD" || true
+
+# 合并全局 entries + 生成每子树汇总
+cat "$PARTD/root.entries" >> "$ENTRIES" 2>/dev/null || true
+[ -s "$PARTD/root.entries" ] && \
+    awk '$1=="f"{b+=$2;f++} END{printf "%d\t%d\t%s\n", b+0, f+0, "<root-files>"}' "$PARTD/root.entries" >> "$SUBSZ"
+for pf in "$PARTD"/p.*; do
+    case "$pf" in *.subtree) continue ;; esac
+    [ -f "$pf" ] || continue
+    cat "$pf" >> "$ENTRIES"
+    lbl=$(cat "$pf.subtree" 2>/dev/null)
+    rel=${lbl#"$SRC_DIR"}; rel=${rel#/}        # 相对 SRC_DIR 的顶层名
+    awk -v r="$rel" '$1=="f"{b+=$2;f++} END{printf "%d\t%d\t%s\n", b+0, f+0, r}' "$pf" >> "$SUBSZ"
+done
+# subtree-sizes.tsv 按字节降序(便于装箱与查看)
+if [ -s "$SUBSZ" ]; then
+    sort -t"$(printf '\t')" -k1,1nr -o "$SUBSZ" "$SUBSZ" 2>/dev/null || true
+fi
+
+rm -rf "$PARTD"
+
 SCAN_END=$(date +%s)
 SCAN_SEC=$((SCAN_END - SCAN_START))
 
-# 目录数(可选,单独算一次,代价小)
-TOTAL_DIRS=$(find "$SRC_DIR" -type d 2>/dev/null | wc -l)
+# 兼容产出: sizes.txt(仅文件大小)
+awk '$1=="f"{print $2}' "$ENTRIES" > "$WORKDIR/sizes.txt"
 
 echo "Scan completed in ${SCAN_SEC}s"
+echo "Per-subtree sizes -> $SUBSZ ($(wc -l < "$SUBSZ") 个顶层子树, 供 shard-plan.sh 分片)"
 
 # ----------------------------------------------------------------------
 # 第 2 步: 用 awk 一次性计算所有统计量,输出 JSON
-# 包含 P50/P90/P99 分位数和大小分桶
+# 包含 P50/P90/P99 分位数和大小分桶;total_dirs 由 'd' 行计数 + SRC_DIR 根目录
 # ----------------------------------------------------------------------
-awk -v total_dirs="$TOTAL_DIRS" -v src_dir="$SRC_DIR" -v scan_sec="$SCAN_SEC" '
-{
+awk -v src_dir="$SRC_DIR" -v scan_sec="$SCAN_SEC" '
+$1=="f" {
     n++
-    total += $1
-    sizes[n] = $1
-    if ($1 < 4096)            tiny++
-    else if ($1 < 1048576)    small++
-    else if ($1 < 104857600)  medium++
+    sz = $2
+    total += sz
+    sizes[n] = sz
+    if (sz < 4096)            tiny++
+    else if (sz < 1048576)    small++
+    else if (sz < 104857600)  medium++
     else                      large++
-    if ($1 > max) max = $1
+    if (sz > max) max = sz
 }
+$1=="d" { ddirs++ }
 END {
     if (n == 0) {
         print "ERROR: no files found in source directory" > "/dev/stderr"
         exit 1
     }
+    total_dirs = ddirs + 1   # 各子树目录数 + SRC_DIR 根目录本身
     asort(sizes)
     # 分位数索引下界保护: 极小 n 时 int(n*q) 可能为 0,导致取到空值
     i50 = int(n*0.50); if (i50 < 1) i50 = 1; if (i50 > n) i50 = n
@@ -103,7 +153,7 @@ END {
     printf "  \"large_ratio\": %.4f\n", (large+0)/n
     printf "}\n"
 }
-' "$WORKDIR/sizes.txt" > "$WORKDIR/profile.json"
+' "$ENTRIES" > "$WORKDIR/profile.json"
 
 # ----------------------------------------------------------------------
 # 第 3 步: 友好输出

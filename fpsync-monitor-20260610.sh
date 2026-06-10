@@ -22,10 +22,12 @@ REFRESH="${1:-10}"
 # 配置优先;留空项回退到默认。refresh_seconds 仍由位置参数控制(非复制配置)。
 #
 # 同机多实例(方案A): 每个 fpsync 实例用独立的 -t/-d 目录(由 run.sh 的
-#   RUN_DIR=${RUN_DIR_BASE}/run_<ts>_<pid> 提供)。监控某个实例时,用
-#   FPSYNC_DIR 环境变量指向该实例目录即可,例如:
+#   RUN_DIR=${RUN_DIR_BASE}/run_<ts>_<pid> 提供)。
+#   - 默认(不传任何东西): 自动从 fpsync.env 的 RUN_DIR_BASE 下挑【最近一个真实 run 目录】,
+#     所以单实例场景直接 `./fpsync-monitor-20260610.sh 5` 即可,无需手动指定目录。
+#   - 多实例并发要盯某一个时,用 FPSYNC_DIR 指向该实例目录:
 #     FPSYNC_DIR=/tmp/fpsync_runs/run_20260610_120000_12345 ./fpsync-monitor-20260610.sh 5
-#   也可用 FPSYNC_RUNID(或第 2 个位置参数)锁定具体 run,避免 latest 取错实例。
+#   - 也可用 FPSYNC_RUNID(或第 2 个位置参数)锁定具体 run。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/fpsync.env" ] && . "$SCRIPT_DIR/fpsync.env"
 
@@ -33,9 +35,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FPSYNC_DIR="${FPSYNC_DIR:-}"
 TARGET_RUNID="${2:-${FPSYNC_RUNID:-}}"
 
+# 自动发现: 未显式指定 FPSYNC_DIR 时,若 fpsync.env 配了 RUN_DIR_BASE,
+# 取其下【最近一个含 parts/ 的真实 run 目录】(排除 *_dryrun),实现"读配置即可监控"。
+if [ -z "$FPSYNC_DIR" ] && [ -n "${RUN_DIR_BASE:-}" ] && [ -d "${RUN_DIR_BASE:-}" ]; then
+    FPSYNC_DIR=$(ls -1dt "$RUN_DIR_BASE"/*/ 2>/dev/null | while read -r d; do
+        case "$d" in *_dryrun/) continue ;; esac
+        [ -d "${d}parts" ] && { printf '%s\n' "${d%/}"; break; }
+    done)
+    FPSYNC_DIR="${FPSYNC_DIR:-}"
+fi
+
 # ---------- 配置位 (优先取 fpsync.env,留空则用默认) ----------
 if [ -n "$FPSYNC_DIR" ]; then
-    # 指定了实例目录: queue/work/done/parts/log 全部在该目录下(run.sh 的 -t=-d)
+    # 实例目录: queue/work/done/parts/log 全部在该目录下(run.sh 的 -t=-d)
     FPSYNC_TMPDIR="$FPSYNC_DIR"
     FPSYNC_SHARED_DIR="$FPSYNC_DIR"
 else
