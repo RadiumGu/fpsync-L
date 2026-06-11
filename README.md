@@ -177,7 +177,7 @@ AWS_RECEIVERS="10.0.2.31 10.0.2.32 10.0.2.33" # 接收机(与发送机等长一�
 ### 一行命令完整流程
 
 ```bash
-cd /Users/glei/genai/fpsync-m
+cd /path/to/fpsync-latest
 
 # 1. 扫描源端
 ./source-profile.sh /mnt/source /tmp/fpsync_profile
@@ -503,15 +503,28 @@ RSYNC_OPTS="$RSYNC_OPTS -e 'ssh -T -c aes128-gcm@openssh.com -o Compression=no'"
 ## 文件清单
 
 ```
-/Users/glei/genai/fpsync-m/
+fpsync-latest/
+├── fpsync.env                   # 统一配置(复制相关环境变量唯一真相源)
+│
+├── source-profile.sh            # 源端画像(并行扫描;产出 profile.json / subtree-sizes.tsv)
+├── generate-fpsync-cmd.sh       # 据画像推导 fpsync 参数 + 回写 + 生成 run.sh
+├── shard-plan.sh                # 主机驱动分片传输(1:1 配对、组内串行;--incremental 增量)
+├── incremental-sync.sh          # 增量同步入口(= shard-plan.sh --incremental)
+├── shard-monitor.sh             # 分片汇总进度 + 各发送端网卡吞吐(纯读)
+├── fpsync-monitor-20260610.sh   # 单实例 fpsync 运行监控(7 面板)
+├── fpsync-verify.sh             # 内容级一致性校验(rsync --checksum 干跑)
+├── cleanup-fpsync-test.sh       # 测试资源清理(AWS 实例/EFS/SG)
+│
 ├── README.md                    # 本文件
-├── source-profile.sh            # 扫描脚本(可执行)
-├── generate-fpsync-cmd.sh       # 参数生成脚本(可执行)
-├── source-profile.md            # 历史版本(初版,有性能问题,保留参考)
-└── fpsync-c.md                  # 历史版本(初版,有方向性错误,保留参考)
+├── TODO.md                      # 后续待办(快照差异增量 / root-files 等)
+├── fpsync-advanced-guide.md     # 多 worker / 增量 / 扫描优化 进阶指南
+├── fpsync-data-consistency.md   # fpsync/rsync 一致性机制说明
+├── fpsync-monitor-20260610.md   # 监控脚本说明
+├── TEST-PLAN.md / TEST-REPORT.md# 端到端测试计划 / 报告
+└── VALIDATION-RECORD.md         # 早期实机验证记录
 ```
 
-历史版本与新版差异请参见提交记录或对比 README 中的"决策逻辑详解"章节。
+各文件作用见顶部"工具组成"表;版本演进见下方"修改记录"与 git 提交历史。
 
 ---
 
