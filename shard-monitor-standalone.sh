@@ -90,15 +90,22 @@ NETEOF
 }
 
 # 在某发送端收集【单个指定运行目录】(任意 -t/-d 目录,不要求 shard_* 命名)的进度
+# 返回(单行, TAB 分隔): runid total done work queue crawl nfiles nsize
+#   crawl: done=fpart 已爬完(total 已定稿) / crawling=仍在爬(total 还会增长)
 collect_dir() {
     local sender="$1" dir="$2"
     local script='rd="'"$dir"'"
         pd=$(ls -1dt "$rd"/parts/*/ 2>/dev/null | head -1); [ -n "$pd" ] || exit 0
         runid=$(basename "$pd")
-        total=$( ( total_num_parts=0; . "$rd/parts/$runid/run.meta" 2>/dev/null; echo "${total_num_parts:-0}" ) )
+        total=0; nfiles=0; nsize=0
+        meta=$( ( total_num_parts=0; total_num_files=0; total_size=0; . "$rd/parts/$runid/run.meta" 2>/dev/null
+                  echo "${total_num_parts:-0} ${total_num_files:-0} ${total_size:-0}" ) )
+        total=${meta%% *}; rest=${meta#* }; nfiles=${rest%% *}; nsize=${rest##* }
         done=$(find "$rd/done/$runid" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)
         work=$(find "$rd/work/$runid" -mindepth 1 -maxdepth 1 -type f ! -name fp_done 2>/dev/null | wc -l)
-        printf "%s\t%s\t%s\t%s\n" "$runid" "${total:-0}" "${done:-0}" "${work:-0}"'
+        queue=$(find "$rd/queue/$runid" -mindepth 1 -maxdepth 1 -type f ! -name fp_done ! -name info ! -name sl_stop 2>/dev/null | wc -l)
+        if [ -f "$rd/queue/$runid/fp_done" ] || [ -f "$rd/work/$runid/fp_done" ]; then crawl=done; else crawl=crawling; fi
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$runid" "${total:-0}" "${done:-0}" "${work:-0}" "${queue:-0}" "$crawl" "${nfiles:-0}" "${nsize:-0}"'
     if [ "$sender" = "local" ] || [ "$sender" = "localhost" ]; then bash -c "$script"; else
         ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=6 "$sender" "bash -c '$script'" 2>/dev/null; fi
 }
@@ -133,21 +140,25 @@ detect_stamp() {
 }
 
 snapshot() {
-    clear 2>/dev/null || true
+    # 注意: 不在此处 clear。主循环用光标定位就地重绘(\033[H + 每行 \033[K + 末尾 \033[J),
+    # 避免整屏清空导致的闪烁。REFRESH=0 的一次性快照场景由调用方自行决定是否清屏。
     # ---- 单目录模式(--dir / MON_DIR):盯任意一个 fpsync -t/-d 目录,不要求 shard_* 命名 ----
     if [ -n "$MON_DIR" ]; then
         local host="${SND[0]}"
         echo "fpsync 监控(独立版·单目录)  $(date '+%F %T')"
         echo "目录: $MON_DIR   主机: $host"
         echo "------------------------------------------------------------------"
-        printf "%-22s %-12s %-6s %s\n" "runid" "done/total" "%" "work"
-        local rid total done work pct
-        IFS=$'\t' read -r rid total done work < <(collect_dir "$host" "$MON_DIR")
+        printf "%-22s %-12s %-6s %-7s %-7s %s\n" "runid" "done/total" "%" "work" "queue" "爬取"
+        local rid total done work queue crawl nfiles nsize pct crawl_txt
+        IFS=$'\t' read -r rid total done work queue crawl nfiles nsize < <(collect_dir "$host" "$MON_DIR")
         if [ -z "${rid:-}" ]; then
             echo "(该目录下暂无可读分区数据;FPART 仍在爬取,或目录/runid 不对)"
         else
             pct=$(awk -v d="${done:-0}" -v t="${total:-0}" 'BEGIN{printf "%s",(t>0)?sprintf("%.1f",d*100/t):"-"}')
-            printf "%-22s %-12s %-6s %s\n" "$rid" "${done:-0}/${total:-0}" "$pct" "${work:-0}"
+            if [ "${crawl:-}" = "done" ]; then crawl_txt="已定稿"; else crawl_txt="爬取中*"; fi
+            printf "%-22s %-12s %-6s %-7s %-7s %s\n" "$rid" "${done:-0}/${total:-0}" "$pct" "${work:-0}" "${queue:-0}" "$crawl_txt"
+            echo "本次 run 总量: ${nfiles:-0} 文件 / $(human "${nsize:-0}")"
+            [ "${crawl:-}" = "done" ] || echo "* FPART 仍在爬取,total 分区数还会增长,百分比仅供参考"
         fi
         if [ "$NO_NET" != "1" ]; then
             echo "------------------------------------------------------------------"
@@ -203,9 +214,21 @@ if ! [ "$REFRESH" -ge 0 ] 2>/dev/null; then
     echo "refresh 必须是 >=0 的整数,收到: $REFRESH" >&2; exit 1
 fi
 if [ "$REFRESH" -eq 0 ]; then snapshot; exit 0; fi
-trap 'echo; echo "退出汇总监控"; exit 0' INT TERM
+
+# 退出时恢复光标显示并把光标移到屏幕底部,避免后续 shell 输出叠在面板里
+trap 'printf "\033[?25h"; printf "\033[J"; echo; echo "退出汇总监控"; exit 0' INT TERM
+
+printf '\033[2J\033[H'   # 进入监控时清屏一次(之后不再整屏清空)
+printf '\033[?25l'       # 隐藏光标,减少闪烁
 while true; do
-    snapshot
-    echo; echo "刷新间隔: ${REFRESH}s   Ctrl+C 退出"
+    # 先把整帧内容生成到字符串(含底部提示),再【就地重绘】:
+    #   \033[H 光标回左上角;每行结尾 \033[K 清到行尾(擦掉上一帧更长的残留);
+    #   末尾 \033[J 清到屏幕底(本帧行数变少时擦掉旧行)。
+    frame="$(snapshot; echo; echo "刷新间隔: ${REFRESH}s   Ctrl+C 退出")"
+    printf '\033[H'
+    while IFS= read -r _ln; do
+        printf '%s\033[K\n' "$_ln"
+    done <<< "$frame"
+    printf '\033[J'
     sleep "$REFRESH"
 done
