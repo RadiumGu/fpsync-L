@@ -12,6 +12,10 @@
 #       其余直接作 ssh 目标,如 "ec2-user@10.0.1.22" 或 "10.0.1.22"。
 #   --run-dir-base <path>  | MON_RUN_DIR_BASE   | "/var/log/fpsync_runs"
 #       各发送机上 fpsync 的运行目录基准(shard-plan 的 RUN_DIR_BASE)。
+#   --dir <path>           | MON_DIR            | (空)
+#       【单目录模式】直接盯某一个 fpsync 的 -t/-d 目录(任意命名,不要求 shard_*)。
+#       适用于手工单条 fpsync(如未传 -t/-d 时默认 /tmp/fpsync)。设置后忽略 --stamp。
+#       默认读本机;若该目录在远程发送机,用 --senders "user@host" 指定(取第一个)。
 #   --stamp <STAMP>        | MON_STAMP          | (自动取最近一批)
 #       批次时间戳,对应目录名 shard_<STAMP>_*;留空=自动挑最近一批。
 #   --refresh <秒>         | MON_REFRESH        | 5
@@ -36,13 +40,15 @@ RUN_DIR_BASE="${MON_RUN_DIR_BASE:-/var/log/fpsync_runs}"
 STAMP_ARG="${MON_STAMP:-}"
 REFRESH="${MON_REFRESH:-5}"
 NO_NET="${MON_NO_NET:-0}"
+MON_DIR="${MON_DIR:-}"
 
 # ---------- 命令行解析(优先于环境变量)----------
-print_help() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+print_help() { sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --senders)      SENDERS_STR="$2"; shift 2 ;;
         --run-dir-base) RUN_DIR_BASE="$2"; shift 2 ;;
+        --dir)          MON_DIR="$2"; shift 2 ;;
         --stamp)        STAMP_ARG="$2"; shift 2 ;;
         --refresh)      REFRESH="$2"; shift 2 ;;
         --no-net)       NO_NET=1; shift ;;
@@ -83,6 +89,20 @@ NETEOF
     fi
 }
 
+# 在某发送端收集【单个指定运行目录】(任意 -t/-d 目录,不要求 shard_* 命名)的进度
+collect_dir() {
+    local sender="$1" dir="$2"
+    local script='rd="'"$dir"'"
+        pd=$(ls -1dt "$rd"/parts/*/ 2>/dev/null | head -1); [ -n "$pd" ] || exit 0
+        runid=$(basename "$pd")
+        total=$( ( total_num_parts=0; . "$rd/parts/$runid/run.meta" 2>/dev/null; echo "${total_num_parts:-0}" ) )
+        done=$(find "$rd/done/$runid" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)
+        work=$(find "$rd/work/$runid" -mindepth 1 -maxdepth 1 -type f ! -name fp_done 2>/dev/null | wc -l)
+        printf "%s\t%s\t%s\t%s\n" "$runid" "${total:-0}" "${done:-0}" "${work:-0}"'
+    if [ "$sender" = "local" ] || [ "$sender" = "localhost" ]; then bash -c "$script"; else
+        ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=6 "$sender" "bash -c '$script'" 2>/dev/null; fi
+}
+
 # 在某发送端收集分片进度: 每行 "label<TAB>total<TAB>done<TAB>work"
 collect() {
     local sender="$1" stamp="$2"
@@ -114,6 +134,29 @@ detect_stamp() {
 
 snapshot() {
     clear 2>/dev/null || true
+    # ---- 单目录模式(--dir / MON_DIR):盯任意一个 fpsync -t/-d 目录,不要求 shard_* 命名 ----
+    if [ -n "$MON_DIR" ]; then
+        local host="${SND[0]}"
+        echo "fpsync 监控(独立版·单目录)  $(date '+%F %T')"
+        echo "目录: $MON_DIR   主机: $host"
+        echo "------------------------------------------------------------------"
+        printf "%-22s %-12s %-6s %s\n" "runid" "done/total" "%" "work"
+        local rid total done work pct
+        IFS=$'\t' read -r rid total done work < <(collect_dir "$host" "$MON_DIR")
+        if [ -z "${rid:-}" ]; then
+            echo "(该目录下暂无可读分区数据;FPART 仍在爬取,或目录/runid 不对)"
+        else
+            pct=$(awk -v d="${done:-0}" -v t="${total:-0}" 'BEGIN{printf "%s",(t>0)?sprintf("%.1f",d*100/t):"-"}')
+            printf "%-22s %-12s %-6s %s\n" "$rid" "${done:-0}/${total:-0}" "$pct" "${work:-0}"
+        fi
+        if [ "$NO_NET" != "1" ]; then
+            echo "------------------------------------------------------------------"
+            local ifc tx rx; read -r ifc tx rx < <(net_rate "$host")
+            echo "网络吞吐(${host}, 1s): 网卡 ${ifc:--}  TX $(human "${tx:-0}")/s↑  RX $(human "${rx:-0}")/s"
+        fi
+        echo "(完成以 fpsync 主进程退出 + 日志 'Fpsync stopped (with success)' 为准)"
+        return
+    fi
     local stamp="$STAMP_ARG"
     [ -z "$stamp" ] && stamp="$(detect_stamp "${SND[0]}")"
     echo "fpsync 分片汇总监控(独立版)  $(date '+%F %T')"
