@@ -69,6 +69,12 @@ brew install fpart
 | `FPART_OPTS` | fpsync `-O` fpart 选项/排除项 | **自动推导**(generate 回写) |
 | `RUN_DIR_BASE` | 运行目录基准(见下) | 默认 `/var/log/fpsync_runs` |
 | `LAST_SYNC_MARKER` | 增量基线时间戳标记 | 默认 `/var/run/fpsync_last_sync` |
+| `RSYNC_SSH` | 远程 push 的 SSH 传输命令(→ `RSYNC_RSH`) | 空=本地模式 |
+| `BWLIMIT` | rsync 限速(保护专线),如 `200m` | 空=不限速 |
+| `SSH_USER` | 跨云两端统一登录用户(分片用) | 默认 `ec2-user` |
+| `DST_BASE` | 接收端 EFS 本地挂载路径(分片用) | 默认 `/mnt/dst` |
+| `GCP_SENDERS` | 发送机清单(只填 IP;`localhost`=本机) | 空 |
+| `AWS_RECEIVERS` | 接收机清单(只填 IP;与发送机等长 1:1) | 空=单对/本地模式 |
 
 ### 优先级
 
@@ -127,6 +133,41 @@ vi fpsync.env             # 1. 至少填 SRC_DIR / DST_DIR
 bash "$(. ./fpsync.env; echo "${WORKDIR:-/tmp/fpsync_profile}")/run.sh"   # 4. dry-run
 # 5. 改并发? 直接改 fpsync.env 的 JOBS,重跑同一 run.sh 即可,无需重新 generate
 ```
+
+---
+
+## 跨云多对分片传输 `shard-plan.sh`(GCP→AWS 等)
+
+把源端按**顶层子树**均衡分到 N 对 `(发送机, 接收机)`,每对一条独立管道并行传输。
+fpsync 跑在**源侧发送机**(本地读源,经 SSH 把数据 push 到接收机本地挂载的 EFS)。
+
+### 配置(只填 IP)
+
+```bash
+SSH_USER="ec2-user"                         # 两端统一登录用户
+DST_BASE="/mnt/dst"                         # 接收端 EFS 本地挂载路径(各接收端一致)
+RSYNC_SSH="ssh -T -o StrictHostKeyChecking=no -o Compression=no"
+GCP_SENDERS="localhost 10.0.1.22 10.0.1.23" # 发送机(localhost=控制机本身);1:1 按位置
+AWS_RECEIVERS="10.0.2.31 10.0.2.32 10.0.2.33" # 接收机(与发送机等长一一对应)
+```
+- 只填 IP,脚本自动拼成 `SSH_USER@ip`(发送)/ `SSH_USER@ip:DST_BASE`(接收);
+  异构可写完整 `user@host` / `user@host:/path`。
+- 发送/接收**等长 1:1**(不等长报错)。
+
+### 用法
+
+```bash
+./source-profile.sh                 # 先画像(产出 subtree-sizes.tsv)
+./shard-plan.sh                     # dry-run:K 自动=节点对数,出配对预览+前置体检+预跑
+./shard-plan.sh --apply             # 确认后真跑(各发送机并行;组内子树串行)
+./shard-monitor.sh 5                # 另一终端看汇总进度 + 各发送端网卡吞吐
+```
+- **K 默认 = 节点对数**(每对一个均衡组);也可显式 `./shard-plan.sh 4` 覆盖。
+- **前置体检**:逐发送机校验 fpsync/源/运行目录,逐对校验"发送机→接收机 SSH + `DST_BASE` 可写";不通即中止 `--apply`。
+- **组内串行**:同一发送机一次只跑一个 fpsync(由 `-n` 控制单机并发),发送机之间并行。
+- **目录骨架预建**:每子树先用单进程 rsync 建好目的目录树,再并行传文件,避免并行 rsync
+  同时 `mkdir` 同一目录导致 "File exists" 报错而丢数据。
+- 各接收机写**同一个 EFS**(不同子路径),并集 = 完整目录树;EFS 建议 Elastic Throughput。
 
 ---
 
