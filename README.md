@@ -318,14 +318,41 @@ bash "$WORKDIR/run.sh"
 
 ### 参数 `-o` (rsync 透传选项)
 
-基础: `-lptgoD --numeric-ids --inplace`
-- `-lptgoD`: 等价于 `-a` 减去 `-r`(fpsync 用 `--files-from` 喂清单,不需要 rsync 递归)
-- `--numeric-ids`: 跨主机迁移保留 UID/GID
-- `--inplace`: 原地写入,避免临时文件占空间
+**基础**: `-lptgoD --numeric-ids --inplace`
 
-条件追加:
-- `--whole-file`: 小文件场景,跳过 delta 算法节省 CPU
-- `--sparse`: P99 > 1GB 时,处理稀疏文件
+`-lptgoD` 等价于 `-a`(归档)去掉 `-r`(递归)——递归由 fpart 完成,fpsync 用 `--files-from` 喂清单,rsync 不必自己递归:
+
+| 选项 | 含义 |
+|---|---|
+| `-l` | 保留软链接(symlink 仍作软链接复制) |
+| `-p` | 保留权限(mode) |
+| `-t` | 保留修改时间 mtime(**关键**:rsync 靠 size+mtime 快速判断是否变化,不保留会每次误判为"变了") |
+| `-g` | 保留属组 |
+| `-o` | 保留属主(需 root) |
+| `-D` | 保留设备/特殊文件 |
+| `--numeric-ids` | 按数字 UID/GID 原样保留(跨云两端账号体系不同,避免错乱) |
+| `--inplace` | 原地写入目的文件(不写临时文件再改名),省空间/IO、利于大文件与续传;写入非原子,配合 `--partial` 续传 |
+
+**条件追加**(`generate-fpsync-cmd.sh` 按画像自动判断):
+| 选项 | 触发条件 | 含义 |
+|---|---|---|
+| `--whole-file` | 小文件占比 >70% | 关闭 delta 差量算法、整文件传输,省两端校验和 CPU |
+| `--sparse` | P99 > 1GB | 高效处理稀疏文件 |
+
+**跨云远程模式追加**(`RSYNC_SSH`/远程 DST 时):
+| 选项 | 含义 |
+|---|---|
+| `--timeout=600` | 检测卡死连接(秒) |
+| `--bwlimit=<X>` | 限速(若设了 `BWLIMIT`),保护专线/业务 |
+
+**增量模式追加**(`incremental-sync.sh` / `--incremental`):
+| 选项 | 含义 |
+|---|---|
+| `--update` | 目的端更新者跳过——仅当源更新(或目的不存在)才传;只传新增/变化 |
+| `--partial` | 传输中断保留已传部分,下次可续传(WAN 稳定性) |
+
+> 例:小文件主导 + 跨云增量场景,最终透传选项形如
+> `-lptgoD --numeric-ids --inplace --whole-file --update --partial`。
 
 ---
 
