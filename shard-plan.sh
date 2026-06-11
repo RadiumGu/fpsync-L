@@ -38,10 +38,11 @@ AWS_RECEIVERS="${AWS_RECEIVERS:-}"
 GCP_SENDERS="${GCP_SENDERS:-}"
 
 # ---------- 参数 ----------
-K=""; APPLY=0
+K=""; APPLY=0; INCR=0
 for a in "$@"; do
     case "$a" in
         --apply) APPLY=1 ;;
+        --incremental|--incr) INCR=1 ;;
         ''|*[!0-9]*) : ;;
         *) K="$a" ;;
     esac
@@ -149,6 +150,13 @@ echo ""
 # ---------- 前置体检 ----------
 STAMP=$(date +%Y%m%d_%H%M%S)
 RSYNC_OPTS_EFF="$RSYNC_OPTS"; [ -n "$BWLIMIT" ] && RSYNC_OPTS_EFF="$RSYNC_OPTS_EFF --bwlimit=$BWLIMIT"
+if [ "$INCR" -eq 1 ]; then
+    case " $RSYNC_OPTS_EFF " in *" --update "*) : ;; *) RSYNC_OPTS_EFF="$RSYNC_OPTS_EFF --update" ;; esac
+    case " $RSYNC_OPTS_EFF " in *" --partial "*) : ;; *) RSYNC_OPTS_EFF="$RSYNC_OPTS_EFF --partial" ;; esac
+    echo "★ 增量模式: rsync --update --partial(跳过未变文件,只传新增/变化;不清目的端)"
+    echo "  rsync 选项: $RSYNC_OPTS_EFF"
+    echo ""
+fi
 
 ssh_run() {  # 在发送机执行一段(本机直接 / 远程 ssh);stdin 透传命令
     local sender="$1"; shift

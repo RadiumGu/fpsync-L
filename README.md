@@ -12,6 +12,7 @@
 | `source-profile.sh` | 扫描源端,生成 JSON 格式的文件系统画像(含 P50/P90/P99 分位数) |
 | `generate-fpsync-cmd.sh` | 读取画像,推导出最优 fpsync 参数,生成可执行命令 |
 | `shard-plan.sh` | 按字节均衡把源端顶层子树分成 K 组,生成/执行跨云分片传输(多组 = 多对 发送/接收节点) |
+| `incremental-sync.sh` | 首次全量后的增量同步(`shard-plan --incremental`:rsync `--update --partial`,只传新增/变化,不清目的端) |
 | `shard-monitor.sh` | 分片传输的汇总进度监控(GCP 发送侧,纯读;一屏看所有分片 done/total 与合计) |
 | `fpsync-verify.sh` | 用 fpsync 并发做内容级一致性校验(rsync `--checksum` 干跑),读 `fpsync.env` |
 | `fpsync-data-consistency.md` | fpsync/rsync 一致性机制说明与校验/对账建议 |
